@@ -1,0 +1,28 @@
+name: Release Salt Formulas
+
+on:
+  push:
+    branches:
+      - main
+      - master
+#    paths:
+#      - '.saltbundle.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Salt Bundle Release
+        uses: SomeBlackMagic/salt-bundle/.github/actions/salt-bundle-release@master
+        with:
+          formulas-dir: ./
+          index-branch: gh-pages
+          single: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
