@@ -1,0 +1,14 @@
+var REG_NONE = NewRegistrar("none");
+var DSP = NewDnsProvider;
+
+{% for provider_name, provider in providers.items() %}
+var {{ provider_name }} = DSP("{{ provider.type }}");
+{% endfor %}
+
+{% for zone_name, zone in zones.items() %}
+D("{{ zone_name }}", REG_NONE, DnsProvider({{ zone.provider }}),
+{% for r in zone.final_records %}
+  {{ r.call }}{% if not loop.last %},{% endif %}
+{% endfor %}
+);
+{% endfor %}

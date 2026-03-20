@@ -1,0 +1,23 @@
+enable: false
+
+package_name: dnscontrol
+config_dir: /etc/dnscontrol
+config_mode: '0700'
+creds_mode: '0600'
+lock_file: /var/lock/dnscontrol.lock
+lock_timeout_sec: 120
+
+template_base: salt://dnscontrol/templates
+saltenv: base
+
+dnscontrol_bin: dnscontrol
+
+strict_duplicates: true
+fail_on_warnings: true
+multi_value_types:
+  - MX
+  - TXT
+  - SRV
+
+providers: {}
+zones: {}

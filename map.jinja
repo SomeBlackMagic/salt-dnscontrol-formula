@@ -1,0 +1,5 @@
+{# Data model for dnscontrol formula #}
+{% import_yaml tpldir ~ '/defaults.yaml' as default %}
+
+{# pillar: dnscontrol:... overrides defaults #}
+{% set dnscontrol = salt['pillar.get']('dnscontrol', default, merge=True) %}

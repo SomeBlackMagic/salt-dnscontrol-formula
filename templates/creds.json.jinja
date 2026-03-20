@@ -1,0 +1,8 @@
+{
+{% for provider_name, provider in providers.items() %}
+  "{{ provider_name }}": {
+    "TYPE": "{{ provider.type }}"{% for k, v in provider.credentials.items() %},
+    "{{ k }}": "{{ v }}"{% endfor %}
+  }{% if not loop.last %},{% endif %}
+{% endfor %}
+}

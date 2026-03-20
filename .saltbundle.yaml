@@ -1,0 +1,12 @@
+name: dnscontrol
+version: 0.1.0
+description: DNSControl formula
+maintainers:
+  - name: Andrii Chornyi
+    email: dev@example.com
+
+dependencies: []
+
+salt:
+  min_version: '3006'
+  max_version: '3009'

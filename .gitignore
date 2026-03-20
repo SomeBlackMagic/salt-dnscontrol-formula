@@ -1,0 +1,46 @@
+# IDE and Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# SaltStack
+*.cache
+*.retry
+/var/cache/salt/
+.salt/
+
+# Lock files
+/var/lock/dnscontrol.lock
+*.lock
+
+# OS
+.DS_Store
+Thumbs.db
