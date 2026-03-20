@@ -38,6 +38,14 @@ _DEFAULT_CONFIG = {
 
 _SIMPLE_VALUE_TYPES = {"A", "AAAA", "CNAME", "NS", "PTR", "TXT"}
 _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_PREVIEW_DOMAIN_RE = re.compile(r"^\*+\s+Domain:\s+(?P<domain>\S+)\s*$")
+_PREVIEW_CORRECTIONS_RE = re.compile(
+    r"^(?P<count>\d+)\s+corrections\s+\((?P<provider>[^)]+)\)\s*$"
+)
+_PREVIEW_CHANGE_RE = re.compile(
+    r"^#(?P<index>\d+):\s*(?:(?P<symbol>[+\-±])\s+)?(?P<action>[A-Z][A-Z\-]*)\s+(?P<details>.+)$"
+)
+_PREVIEW_DONE_RE = re.compile(r"^Done\.\s+(?P<count>\d+)\s+corrections\.\s*$")
 
 
 class DNSControlError(Exception):
@@ -896,6 +904,70 @@ def _strip_ansi(text):
     return _ANSI_RE.sub("", str(text))
 
 
+def _parse_preview_output(preview_text):
+    parsed = {
+        "domains": [],
+        "totals": {
+            "domains": 0,
+            "changes": 0,
+            "corrections_reported": 0,
+            "corrections_done": 0,
+        },
+    }
+
+    lines = []
+    if preview_text:
+        lines = [str(line).strip() for line in str(preview_text).splitlines()]
+
+    current_domain = None
+    for line in lines:
+        if not line:
+            continue
+
+        m = _PREVIEW_DOMAIN_RE.match(line)
+        if m:
+            current_domain = {
+                "name": m.group("domain"),
+                "corrections_reported": None,
+                "provider_backend": None,
+                "corrections_done": None,
+                "changes": [],
+            }
+            parsed["domains"].append(current_domain)
+            continue
+
+        m = _PREVIEW_CORRECTIONS_RE.match(line)
+        if m and current_domain is not None:
+            corrections = int(m.group("count"))
+            current_domain["corrections_reported"] = corrections
+            current_domain["provider_backend"] = m.group("provider")
+            parsed["totals"]["corrections_reported"] += corrections
+            continue
+
+        m = _PREVIEW_CHANGE_RE.match(line)
+        if m and current_domain is not None:
+            change = {
+                "index": int(m.group("index")),
+                "symbol": m.group("symbol") or "",
+                "action": m.group("action"),
+                "details": m.group("details"),
+                "raw": line,
+            }
+            current_domain["changes"].append(change)
+            parsed["totals"]["changes"] += 1
+            continue
+
+        m = _PREVIEW_DONE_RE.match(line)
+        if m and current_domain is not None:
+            done = int(m.group("count"))
+            current_domain["corrections_done"] = done
+            parsed["totals"]["corrections_done"] += done
+            continue
+
+    parsed["totals"]["domains"] = len(parsed["domains"])
+    return parsed
+
+
 def _resolve_binary_path(binary_name):
     if binary_name is None:
         return None
@@ -1082,12 +1154,14 @@ def apply(config_dir=None, test=False, pillar_dnscontrol=None):
         preview_result = preview(config_dir=config_dir, pillar_dnscontrol=cfg)
         preview_stdout_clean = _strip_ansi(preview_result.get("stdout", ""))
         preview_stderr_clean = _strip_ansi(preview_result.get("stderr", ""))
+        preview_parsed = _parse_preview_output(preview_stdout_clean)
         result["changes"]["preview"] = {
             "retcode": preview_result["retcode"],
             "stdout": preview_result["stdout"],
             "stderr": preview_result["stderr"],
             "stdout_clean": preview_stdout_clean,
             "stderr_clean": preview_stderr_clean,
+            "parsed": preview_parsed,
         }
         if preview_result["retcode"] != 0:
             details = preview_stderr_clean or preview_stdout_clean or ""
@@ -1393,12 +1467,14 @@ def apply_payload(
         )
         preview_stdout_clean = _strip_ansi(preview_result.get("stdout", ""))
         preview_stderr_clean = _strip_ansi(preview_result.get("stderr", ""))
+        preview_parsed = _parse_preview_output(preview_stdout_clean)
         result["changes"]["preview"] = {
             "retcode": preview_result["retcode"],
             "stdout": preview_result["stdout"],
             "stderr": preview_result["stderr"],
             "stdout_clean": preview_stdout_clean,
             "stderr_clean": preview_stderr_clean,
+            "parsed": preview_parsed,
         }
         if preview_result["retcode"] != 0:
             details = preview_stderr_clean or preview_stdout_clean or ""
