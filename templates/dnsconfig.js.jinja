@@ -2,7 +2,7 @@ var REG_NONE = NewRegistrar("none");
 var DSP = NewDnsProvider;
 
 {% for provider_name, provider in providers.items() %}
-var {{ provider_name }} = DSP("{{ provider.type }}");
+var {{ provider_name }} = DSP("{{ provider.creds_key|default(provider.type) }}");
 {% endfor %}
 
 {% for zone_name, zone in zones.items() %}

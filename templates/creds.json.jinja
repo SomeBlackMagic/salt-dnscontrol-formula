@@ -1,8 +1,15 @@
 {
+{% set ns = namespace(first=true, seen=[]) %}
 {% for provider_name, provider in providers.items() %}
-  "{{ provider_name }}": {
+{% set creds_key = provider.creds_key|default(provider.type) %}
+{% if creds_key not in ns.seen %}
+{% if not ns.first %},{% endif %}
+{% set ns.first = false %}
+{% set _ = ns.seen.append(creds_key) %}
+  "{{ creds_key }}": {
     "TYPE": "{{ provider.type }}"{% for k, v in provider.credentials.items() %},
     "{{ k }}": "{{ v }}"{% endfor %}
-  }{% if not loop.last %},{% endif %}
+  }
+{% endif %}
 {% endfor %}
 }

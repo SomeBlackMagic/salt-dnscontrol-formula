@@ -5,6 +5,7 @@ import errno
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import time
 from collections import OrderedDict
@@ -335,7 +336,55 @@ def _prepare_provider(provider_name, provider_data):
     if not isinstance(credentials, dict):
         raise DNSControlError("Provider '{}': credentials must be mapping".format(provider_name))
 
-    return {"type": ptype, "credentials": credentials}
+    creds_key = str(provider_data.get("creds_key", ptype)).strip()
+    if not creds_key:
+        raise DNSControlError("Provider '{}': creds_key must not be empty".format(provider_name))
+
+    return {"type": ptype, "creds_key": creds_key, "credentials": credentials}
+
+
+def _validate_provider_creds_keys(providers, report):
+    seen = {}
+    for provider_name in providers.keys():
+        provider = providers[provider_name]
+        creds_key = str(provider.get("creds_key", provider.get("type", "")))
+        signature = json.dumps(
+            {
+                "type": provider.get("type"),
+                "credentials": provider.get("credentials", {}),
+            },
+            sort_keys=True,
+            ensure_ascii=True,
+        )
+
+        if creds_key not in seen:
+            seen[creds_key] = {
+                "provider_name": provider_name,
+                "signature": signature,
+            }
+            continue
+
+        previous = seen[creds_key]
+        if previous["signature"] != signature:
+            _add_issue(
+                report,
+                "error",
+                "Multiple providers map to creds key '{}' with different credentials".format(
+                    creds_key
+                ),
+                provider=provider_name,
+                creds_key=creds_key,
+                clashes_with=previous["provider_name"],
+            )
+        else:
+            _add_issue(
+                report,
+                "info",
+                "Multiple providers share the same creds key '{}'".format(creds_key),
+                provider=provider_name,
+                creds_key=creds_key,
+                same_as=previous["provider_name"],
+            )
 
 
 def _build_zone_records(zone_name, zone_data, cfg, report):
@@ -558,6 +607,7 @@ def build_records(pillar_dnscontrol=None):
             _add_issue(report, "error", str(exc), provider=provider_name)
 
     cfg["providers"] = providers
+    _validate_provider_creds_keys(providers, report)
 
     zones = OrderedDict()
     for zone_name in sorted(cfg["zones"].keys()):
@@ -642,8 +692,8 @@ def _render_dnsconfig_content(zones, providers):
     ]
 
     for provider_name in providers.keys():
-        ptype = providers[provider_name]["type"]
-        lines.append('var {} = DSP("{}");'.format(provider_name, ptype))
+        creds_key = providers[provider_name].get("creds_key", providers[provider_name]["type"])
+        lines.append('var {} = DSP("{}");'.format(provider_name, creds_key))
 
     if providers:
         lines.append("")
@@ -671,11 +721,18 @@ def _render_creds_content(providers):
     content = OrderedDict()
     for provider_name in providers.keys():
         provider = providers[provider_name]
+        creds_key = provider.get("creds_key", provider["type"])
         entry = OrderedDict()
         entry["TYPE"] = provider["type"]
         for key, value in provider.get("credentials", {}).items():
             entry[str(key)] = str(value)
-        content[provider_name] = entry
+        if creds_key in content and content[creds_key] != entry:
+            raise DNSControlError(
+                "Conflicting credentials for creds key '{}' from provider '{}'".format(
+                    creds_key, provider_name
+                )
+            )
+        content[creds_key] = entry
 
     return json.dumps(content, indent=2, ensure_ascii=True) + "\n"
 
@@ -753,8 +810,12 @@ def render_config(config_dir=None, zones=None, providers=None, pillar_dnscontrol
         rendered = False
 
     if not rendered:
-        dns_content = _render_dnsconfig_content(zones, providers)
-        creds_content = _render_creds_content(providers)
+        try:
+            dns_content = _render_dnsconfig_content(zones, providers)
+            creds_content = _render_creds_content(providers)
+        except DNSControlError as exc:
+            result["comment"] = str(exc)
+            return result
 
         with open(dns_path, "w", encoding="utf-8") as fp:
             fp.write(dns_content)
@@ -825,6 +886,58 @@ def _run_command(command, cwd):
         "stdout": proc.stdout,
         "stderr": proc.stderr,
     }
+
+
+def _resolve_binary_path(binary_name):
+    if binary_name is None:
+        return None
+
+    binary = str(binary_name).strip()
+    if not binary:
+        return None
+
+    if os.path.isabs(binary) or os.path.sep in binary:
+        return os.path.expanduser(binary)
+
+    cmd_which = __salt__.get("cmd.which")
+    if cmd_which:
+        try:
+            resolved = cmd_which(binary)
+            if resolved:
+                return resolved
+        except Exception:  # pragma: no cover
+            pass
+
+    return shutil.which(binary)
+
+
+def _validate_dnscontrol_binary(binary_name):
+    resolved = _resolve_binary_path(binary_name)
+    if not resolved:
+        return False, "dnscontrol binary not found: '{}'".format(binary_name), None
+
+    if not os.path.exists(resolved):
+        return False, "dnscontrol binary path does not exist: '{}'".format(resolved), resolved
+
+    if not os.path.isfile(resolved):
+        return False, "dnscontrol binary path is not a file: '{}'".format(resolved), resolved
+
+    if not os.access(resolved, os.X_OK):
+        return False, "dnscontrol binary is not executable (+x missing): '{}'".format(resolved), resolved
+
+    check_cmd = "{} --version".format(shlex.quote(resolved))
+    check = _run_command(check_cmd, cwd="/")
+    if check.get("retcode", 1) != 0:
+        details = (check.get("stderr") or check.get("stdout") or "").strip()
+        if details:
+            return (
+                False,
+                "dnscontrol binary is not runnable: {} ({})".format(resolved, details),
+                resolved,
+            )
+        return False, "dnscontrol binary is not runnable: '{}'".format(resolved), resolved
+
+    return True, "", resolved
 
 
 def preview(config_dir=None, pillar_dnscontrol=None):
@@ -921,6 +1034,18 @@ def apply(config_dir=None, test=False, pillar_dnscontrol=None):
 
     if config_dir is None:
         config_dir = cfg["config_dir"]
+
+    binary_ok, binary_msg, binary_path = _validate_dnscontrol_binary(
+        cfg.get("dnscontrol_bin", "dnscontrol")
+    )
+    if not binary_ok:
+        report = _new_report()
+        _add_issue(report, "error", binary_msg)
+        result["report"] = report
+        result["comment"] = binary_msg
+        return result
+
+    result["changes"]["binary"] = {"path": binary_path, "check": "ok"}
 
     lock_fd = None
     try:
@@ -1030,6 +1155,8 @@ def _prepare_payload(providers, zones, report):
             )
         except DNSControlError as exc:
             _add_issue(report, "error", str(exc), provider=provider_name)
+
+    _validate_provider_creds_keys(prepared_providers, report)
 
     prepared_zones = OrderedDict()
     for zone_name in sorted(zones.keys()):
@@ -1213,6 +1340,16 @@ def apply_payload(
             warnings = [str(warnings)]
         for warning in warnings:
             _add_issue(result["report"], "warning", str(warning))
+
+    binary_ok, binary_msg, binary_path = _validate_dnscontrol_binary(
+        cfg.get("dnscontrol_bin", "dnscontrol")
+    )
+    if not binary_ok:
+        _add_issue(result["report"], "error", binary_msg)
+        result["comment"] = binary_msg
+        return result
+
+    result["changes"]["binary"] = {"path": binary_path, "check": "ok"}
 
     lock_fd = None
     try:

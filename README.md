@@ -111,7 +111,7 @@ dnscontrol:
 - `strict_duplicates` - `true`: conflict = error, `false`: conflict = warning
 - `fail_on_warnings` - blocks `push` when warnings are present
 - `multi_value_types` - record types where multiple values per key are allowed
-- `providers.*.type` and `providers.*.credentials`
+- `providers.*.type`, optional `providers.*.creds_key`, and `providers.*.credentials`
 - `zones.*.provider`, `zones.*.record_groups`, `zones.*.record_group_order`
 
 ## Supported record types
