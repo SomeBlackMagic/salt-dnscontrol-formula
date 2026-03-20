@@ -4,6 +4,7 @@ import copy
 import errno
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -36,6 +37,7 @@ _DEFAULT_CONFIG = {
 }
 
 _SIMPLE_VALUE_TYPES = {"A", "AAAA", "CNAME", "NS", "PTR", "TXT"}
+_ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
 class DNSControlError(Exception):
@@ -888,6 +890,12 @@ def _run_command(command, cwd):
     }
 
 
+def _strip_ansi(text):
+    if not text:
+        return ""
+    return _ANSI_RE.sub("", str(text))
+
+
 def _resolve_binary_path(binary_name):
     if binary_name is None:
         return None
@@ -1072,13 +1080,17 @@ def apply(config_dir=None, test=False, pillar_dnscontrol=None):
         result["changes"]["rendered_files"] = render_result["files"]
 
         preview_result = preview(config_dir=config_dir, pillar_dnscontrol=cfg)
+        preview_stdout_clean = _strip_ansi(preview_result.get("stdout", ""))
+        preview_stderr_clean = _strip_ansi(preview_result.get("stderr", ""))
         result["changes"]["preview"] = {
             "retcode": preview_result["retcode"],
             "stdout": preview_result["stdout"],
             "stderr": preview_result["stderr"],
+            "stdout_clean": preview_stdout_clean,
+            "stderr_clean": preview_stderr_clean,
         }
         if preview_result["retcode"] != 0:
-            details = preview_result.get("stderr") or preview_result.get("stdout") or ""
+            details = preview_stderr_clean or preview_stdout_clean or ""
             details = details.strip()
             if details:
                 result["comment"] = "dnscontrol preview failed: {}".format(details)
@@ -1092,7 +1104,7 @@ def apply(config_dir=None, test=False, pillar_dnscontrol=None):
         if test:
             result["result"] = True
             result["comment"] = "Preview completed in test mode; push skipped"
-            preview_text = (preview_result.get("stdout") or "").strip()
+            preview_text = preview_stdout_clean.strip()
             if preview_text:
                 result["comment"] += "\n\n{}".format(preview_text)
             return result
@@ -1113,7 +1125,7 @@ def apply(config_dir=None, test=False, pillar_dnscontrol=None):
             "stderr": push_result["stderr"],
         }
         if push_result["retcode"] != 0:
-            details = push_result.get("stderr") or push_result.get("stdout") or ""
+            details = _strip_ansi(push_result.get("stderr") or push_result.get("stdout") or "")
             details = details.strip()
             if details:
                 result["comment"] = "dnscontrol push failed: {}".format(details)
@@ -1379,13 +1391,17 @@ def apply_payload(
             "{} preview".format(cfg.get("dnscontrol_bin", "dnscontrol")),
             cwd=cfg["config_dir"],
         )
+        preview_stdout_clean = _strip_ansi(preview_result.get("stdout", ""))
+        preview_stderr_clean = _strip_ansi(preview_result.get("stderr", ""))
         result["changes"]["preview"] = {
             "retcode": preview_result["retcode"],
             "stdout": preview_result["stdout"],
             "stderr": preview_result["stderr"],
+            "stdout_clean": preview_stdout_clean,
+            "stderr_clean": preview_stderr_clean,
         }
         if preview_result["retcode"] != 0:
-            details = preview_result.get("stderr") or preview_result.get("stdout") or ""
+            details = preview_stderr_clean or preview_stdout_clean or ""
             details = details.strip()
             if details:
                 result["comment"] = "dnscontrol preview failed: {}".format(details)
@@ -1399,7 +1415,7 @@ def apply_payload(
         if test:
             result["result"] = True
             result["comment"] = "Preview completed in test mode; push skipped"
-            preview_text = (preview_result.get("stdout") or "").strip()
+            preview_text = preview_stdout_clean.strip()
             if preview_text:
                 result["comment"] += "\n\n{}".format(preview_text)
             return result
@@ -1423,7 +1439,7 @@ def apply_payload(
             "stderr": push_result["stderr"],
         }
         if push_result["retcode"] != 0:
-            details = push_result.get("stderr") or push_result.get("stdout") or ""
+            details = _strip_ansi(push_result.get("stderr") or push_result.get("stdout") or "")
             details = details.strip()
             if details:
                 result["comment"] = "dnscontrol push failed: {}".format(details)
