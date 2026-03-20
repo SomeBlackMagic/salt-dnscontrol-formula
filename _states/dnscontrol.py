@@ -56,6 +56,7 @@ def managed(
 
     ret["changes"] = mod_result.get("changes", {})
     ret["comment"] = mod_result.get("comment", "")
+    would_push = mod_result.get("would_push")
 
     if not mod_result.get("result", False):
         ret["result"] = False
@@ -71,11 +72,11 @@ def managed(
                 summary.append("warnings={}".format(len(warnings)))
             if summary:
                 suffix = " ({}).".format(", ".join(summary))
-                ret["comment"] = (ret["comment"] or "dnscontrol.apply failed") + suffix
+                ret["comment"] = (ret["comment"] or "dnscontrol.apply_payload failed") + suffix
         return ret
 
     if test:
-        if ret["changes"].get("would_push"):
+        if would_push:
             ret["result"] = None
             if not ret["comment"]:
                 ret["comment"] = "Preview completed in test mode; push would be executed"

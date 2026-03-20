@@ -235,7 +235,6 @@ Notes:
 
 Required functions:
 - `build_records(pillar_dnscontrol) -> {zones, report}`
-- `detect_duplicates(zones, opts) -> report`
 - `render_config(config_dir, zones, providers) -> files`
 - `preview(config_dir) -> result`
 - `push(config_dir) -> result`

@@ -38,14 +38,6 @@ _DEFAULT_CONFIG = {
 
 _SIMPLE_VALUE_TYPES = {"A", "AAAA", "CNAME", "NS", "PTR", "TXT"}
 _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-_PREVIEW_DOMAIN_RE = re.compile(r"^\*+\s+Domain:\s+(?P<domain>\S+)\s*$")
-_PREVIEW_CORRECTIONS_RE = re.compile(
-    r"^(?P<count>\d+)\s+corrections\s+\((?P<provider>[^)]+)\)\s*$"
-)
-_PREVIEW_CHANGE_RE = re.compile(
-    r"^#(?P<index>\d+):\s*(?:(?P<symbol>[+\-±])\s+)?(?P<action>[A-Z][A-Z\-]*)\s+(?P<details>.+)$"
-)
-_PREVIEW_DONE_RE = re.compile(r"^Done\.\s+(?P<count>\d+)\s+corrections\.\s*$")
 
 
 class DNSControlError(Exception):
@@ -646,46 +638,6 @@ def build_records(pillar_dnscontrol=None):
     }
 
 
-def detect_duplicates(zones=None, opts=None, pillar_dnscontrol=None):
-    """Compatibility function. Duplicates are detected during build_records."""
-    if zones is None:
-        return build_records(pillar_dnscontrol=pillar_dnscontrol)["report"]
-
-    report = _new_report()
-    strict_duplicates = True
-    multi_types = {"MX", "TXT", "SRV"}
-
-    if isinstance(opts, dict):
-        strict_duplicates = _as_bool(opts.get("strict_duplicates"), True)
-        if isinstance(opts.get("multi_value_types"), list):
-            multi_types = {str(t).upper() for t in opts["multi_value_types"]}
-
-    for zone_name, zone_data in zones.items():
-        index = {}
-        for rec in zone_data.get("final_records", []):
-            key = "{}|{}".format(rec.get("fqdn", rec.get("name", "")), rec.get("type", ""))
-            index.setdefault(key, []).append(rec)
-
-        for key, records in index.items():
-            if len(records) <= 1:
-                continue
-            rtype = str(records[0].get("type", "")).upper()
-            signatures = {_payload_signature(r) for r in records}
-            if len(signatures) == 1:
-                continue
-            if rtype in multi_types:
-                continue
-
-            message = "Conflict duplicate in zone '{}' for key '{}'".format(zone_name, key)
-            if strict_duplicates:
-                _add_issue(report, "error", message, zone=zone_name, key=key)
-            else:
-                _add_issue(report, "warning", message, zone=zone_name, key=key)
-
-    _finalize_report(report, zones)
-    return report
-
-
 def _ensure_dir(path, mode):
     os.makedirs(path, exist_ok=True)
     try:
@@ -904,68 +856,94 @@ def _strip_ansi(text):
     return _ANSI_RE.sub("", str(text))
 
 
-def _parse_preview_output(preview_text):
-    parsed = {
-        "domains": [],
-        "totals": {
-            "domains": 0,
-            "changes": 0,
-            "corrections_reported": 0,
-            "corrections_done": 0,
-        },
+def _to_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _summarize_dnscontrol_report(report_data):
+    summary = {
+        "entries": 0,
+        "domains": 0,
+        "corrections_total": 0,
+        "correction_details_total": 0,
+        "providers": [],
+        "registrars": [],
     }
 
-    lines = []
-    if preview_text:
-        lines = [str(line).strip() for line in str(preview_text).splitlines()]
+    if report_data is None:
+        return summary
 
-    current_domain = None
-    for line in lines:
-        if not line:
+    if isinstance(report_data, list):
+        entries = report_data
+    elif isinstance(report_data, dict):
+        entries = [report_data]
+    else:
+        return summary
+
+    providers = set()
+    registrars = set()
+    domains = set()
+    corrections_total = 0
+    details_total = 0
+
+    for entry in entries:
+        if not isinstance(entry, dict):
             continue
 
-        m = _PREVIEW_DOMAIN_RE.match(line)
-        if m:
-            current_domain = {
-                "name": m.group("domain"),
-                "corrections_reported": None,
-                "provider_backend": None,
-                "corrections_done": None,
-                "changes": [],
-            }
-            parsed["domains"].append(current_domain)
-            continue
+        domain = entry.get("domain")
+        if domain:
+            domains.add(str(domain))
 
-        m = _PREVIEW_CORRECTIONS_RE.match(line)
-        if m and current_domain is not None:
-            corrections = int(m.group("count"))
-            current_domain["corrections_reported"] = corrections
-            current_domain["provider_backend"] = m.group("provider")
-            parsed["totals"]["corrections_reported"] += corrections
-            continue
+        corrections_total += _to_int(entry.get("corrections"), 0)
 
-        m = _PREVIEW_CHANGE_RE.match(line)
-        if m and current_domain is not None:
-            change = {
-                "index": int(m.group("index")),
-                "symbol": m.group("symbol") or "",
-                "action": m.group("action"),
-                "details": m.group("details"),
-                "raw": line,
-            }
-            current_domain["changes"].append(change)
-            parsed["totals"]["changes"] += 1
-            continue
+        details = entry.get("correction_details")
+        if isinstance(details, list):
+            details_total += len(details)
 
-        m = _PREVIEW_DONE_RE.match(line)
-        if m and current_domain is not None:
-            done = int(m.group("count"))
-            current_domain["corrections_done"] = done
-            parsed["totals"]["corrections_done"] += done
-            continue
+        provider = entry.get("provider")
+        if provider:
+            providers.add(str(provider))
 
-    parsed["totals"]["domains"] = len(parsed["domains"])
-    return parsed
+        registrar = entry.get("registrar")
+        if registrar:
+            registrars.add(str(registrar))
+
+    summary["entries"] = len(entries)
+    summary["domains"] = len(domains)
+    summary["corrections_total"] = corrections_total
+    summary["correction_details_total"] = details_total
+    summary["providers"] = sorted(providers)
+    summary["registrars"] = sorted(registrars)
+    return summary
+
+
+def _read_dnscontrol_report(report_path):
+    if not report_path:
+        return None, "dnscontrol report path is empty"
+
+    if not os.path.exists(report_path):
+        return None, "dnscontrol report file was not created: '{}'".format(report_path)
+
+    try:
+        with open(report_path, "r", encoding="utf-8") as fp:
+            return json.load(fp), ""
+    except Exception as exc:
+        return (
+            None,
+            "failed to parse dnscontrol report file '{}': {}".format(report_path, exc),
+        )
+
+
+def _remove_file_if_exists(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
 
 
 def _resolve_binary_path(binary_name):
@@ -1020,38 +998,43 @@ def _validate_dnscontrol_binary(binary_name):
     return True, "", resolved
 
 
-def preview(config_dir=None, pillar_dnscontrol=None):
+def _run_dnscontrol_action(action, config_dir=None, pillar_dnscontrol=None, report_path=None):
+    cfg = _load_config(pillar_dnscontrol=pillar_dnscontrol)
+    if config_dir is None:
+        config_dir = cfg["config_dir"]
+
+    cmd_parts = [cfg.get("dnscontrol_bin", "dnscontrol"), action]
+    if report_path:
+        _remove_file_if_exists(report_path)
+        cmd_parts.extend(["--report", report_path])
+    cmd = " ".join(shlex.quote(str(part)) for part in cmd_parts)
+    return _run_command(cmd, cwd=config_dir)
+
+
+def preview(config_dir=None, pillar_dnscontrol=None, report_path=None):
     """Run `dnscontrol preview` in config_dir."""
-    cfg = _load_config(pillar_dnscontrol=pillar_dnscontrol)
-    if config_dir is None:
-        config_dir = cfg["config_dir"]
+    return _run_dnscontrol_action(
+        action="preview",
+        config_dir=config_dir,
+        pillar_dnscontrol=pillar_dnscontrol,
+        report_path=report_path,
+    )
 
-    cmd = "{} preview".format(cfg.get("dnscontrol_bin", "dnscontrol"))
-    return _run_command(cmd, cwd=config_dir)
 
-
-def push(config_dir=None, pillar_dnscontrol=None):
+def push(config_dir=None, pillar_dnscontrol=None, report_path=None):
     """Run `dnscontrol push` in config_dir."""
-    cfg = _load_config(pillar_dnscontrol=pillar_dnscontrol)
-    if config_dir is None:
-        config_dir = cfg["config_dir"]
+    return _run_dnscontrol_action(
+        action="push",
+        config_dir=config_dir,
+        pillar_dnscontrol=pillar_dnscontrol,
+        report_path=report_path,
+    )
 
-    cmd = "{} push".format(cfg.get("dnscontrol_bin", "dnscontrol"))
-    return _run_command(cmd, cwd=config_dir)
 
-
-def _preview_has_changes(preview_result):
-    text = "{}\n{}".format(
-        preview_result.get("stdout", ""), preview_result.get("stderr", "")
-    ).lower()
-
-    no_change_markers = [
-        "no changes",
-        "0 changes",
-        "nothing to do",
-        "all records are already correct",
-    ]
-    return not any(marker in text for marker in no_change_markers)
+def _preview_has_changes(report_summary):
+    if not isinstance(report_summary, dict):
+        return False
+    return _to_int(report_summary.get("corrections_total"), 0) > 0
 
 
 def _lock_file(lock_path, timeout_sec):
@@ -1095,6 +1078,122 @@ def _unlock_file(fd):
         fd.close()
 
 
+def _ensure_dnscontrol_binary(cfg, result):
+    binary_ok, binary_msg, _ = _validate_dnscontrol_binary(
+        cfg.get("dnscontrol_bin", "dnscontrol")
+    )
+    if binary_ok:
+        return True
+
+    report = result.get("report") or _new_report()
+    _add_issue(report, "error", binary_msg)
+    result["report"] = report
+    result["comment"] = binary_msg
+    return False
+
+
+def _run_with_dnscontrol_lock(cfg, result, operation_name, action):
+    lock_fd = None
+    try:
+        lock_fd = _lock_file(cfg["lock_file"], cfg["lock_timeout_sec"])
+        return action()
+    except LockTimeoutError as exc:
+        report = result.get("report") or _new_report()
+        _add_issue(report, "error", str(exc))
+        result["report"] = report
+        result["comment"] = str(exc)
+        return result
+    except Exception as exc:  # pragma: no cover
+        report = result.get("report") or _new_report()
+        _add_issue(report, "error", "Unhandled exception: {}".format(exc))
+        result["report"] = report
+        result["comment"] = "Unhandled exception during dnscontrol.{}: {}".format(
+            operation_name, exc
+        )
+        return result
+    finally:
+        _unlock_file(lock_fd)
+
+
+def _execute_render_preview_push(cfg, config_dir, zones, providers, report, test):
+    result = {
+        "result": False,
+        "changes": {},
+        "comment": "",
+        "report": report,
+    }
+
+    render_result = render_config(
+        config_dir=config_dir,
+        zones=zones,
+        providers=providers,
+        pillar_dnscontrol=cfg,
+    )
+    if not render_result.get("result"):
+        result["comment"] = render_result.get("comment", "render_config failed")
+        return result
+
+    preview_report_path = os.path.join(config_dir, "preview-report.json")
+    preview_result = preview(
+        config_dir=config_dir,
+        pillar_dnscontrol=cfg,
+        report_path=preview_report_path,
+    )
+    preview_stdout_clean = _strip_ansi(preview_result.get("stdout", ""))
+    preview_stderr_clean = _strip_ansi(preview_result.get("stderr", ""))
+    preview_report_data, preview_report_error = _read_dnscontrol_report(preview_report_path)
+    preview_report_summary = _summarize_dnscontrol_report(preview_report_data)
+    result["changes"]["preview"] = preview_stdout_clean
+
+    if preview_result["retcode"] == 0 and preview_report_error:
+        _add_issue(report, "error", preview_report_error)
+        result["comment"] = preview_report_error
+        return result
+
+    if preview_result["retcode"] != 0:
+        details = preview_stderr_clean or preview_stdout_clean or ""
+        details = details.strip()
+        if details:
+            result["comment"] = "dnscontrol preview failed: {}".format(details)
+        else:
+            result["comment"] = "dnscontrol preview failed"
+        return result
+
+    has_changes = _preview_has_changes(preview_report_summary)
+    result["would_push"] = has_changes
+
+    if test:
+        result["result"] = True
+        result["comment"] = "Preview completed in test mode; push skipped"
+        preview_text = preview_stdout_clean.strip()
+        if preview_text:
+            result["comment"] += "\n\n{}".format(preview_text)
+        return result
+
+    if report["warnings"] and cfg["fail_on_warnings"]:
+        result["comment"] = "Warnings detected and fail_on_warnings=true; push blocked"
+        return result
+
+    if not has_changes:
+        result["result"] = True
+        result["comment"] = "No DNS changes detected; push skipped"
+        return result
+
+    push_result = push(config_dir=config_dir, pillar_dnscontrol=cfg)
+    if push_result["retcode"] != 0:
+        details = _strip_ansi(push_result.get("stderr") or push_result.get("stdout") or "")
+        details = details.strip()
+        if details:
+            result["comment"] = "dnscontrol push failed: {}".format(details)
+        else:
+            result["comment"] = "dnscontrol push failed"
+        return result
+
+    result["result"] = True
+    result["comment"] = "Preview and push completed successfully"
+    return result
+
+
 def apply(config_dir=None, test=False, pillar_dnscontrol=None):
     """End-to-end pipeline: build, validate, render, preview, optional push."""
     result = {
@@ -1115,22 +1214,10 @@ def apply(config_dir=None, test=False, pillar_dnscontrol=None):
     if config_dir is None:
         config_dir = cfg["config_dir"]
 
-    binary_ok, binary_msg, binary_path = _validate_dnscontrol_binary(
-        cfg.get("dnscontrol_bin", "dnscontrol")
-    )
-    if not binary_ok:
-        report = _new_report()
-        _add_issue(report, "error", binary_msg)
-        result["report"] = report
-        result["comment"] = binary_msg
+    if not _ensure_dnscontrol_binary(cfg, result):
         return result
 
-    result["changes"]["binary"] = {"path": binary_path, "check": "ok"}
-
-    lock_fd = None
-    try:
-        lock_fd = _lock_file(cfg["lock_file"], cfg["lock_timeout_sec"])
-
+    def _apply_action():
         build_data = build_records(pillar_dnscontrol=cfg)
         report = build_data["report"]
         result["report"] = report
@@ -1139,92 +1226,16 @@ def apply(config_dir=None, test=False, pillar_dnscontrol=None):
             result["comment"] = "Validation failed before render"
             return result
 
-        render_result = render_config(
+        return _execute_render_preview_push(
+            cfg=cfg,
             config_dir=config_dir,
             zones=build_data["zones"],
             providers=build_data["providers"],
-            pillar_dnscontrol=cfg,
+            report=report,
+            test=test,
         )
-        if not render_result.get("result"):
-            result["comment"] = render_result.get("comment", "render_config failed")
-            return result
 
-        result["changes"]["rendered_files"] = render_result["files"]
-
-        preview_result = preview(config_dir=config_dir, pillar_dnscontrol=cfg)
-        preview_stdout_clean = _strip_ansi(preview_result.get("stdout", ""))
-        preview_stderr_clean = _strip_ansi(preview_result.get("stderr", ""))
-        preview_parsed = _parse_preview_output(preview_stdout_clean)
-        result["changes"]["preview"] = {
-            "retcode": preview_result["retcode"],
-            "stdout": preview_result["stdout"],
-            "stderr": preview_result["stderr"],
-            "stdout_clean": preview_stdout_clean,
-            "stderr_clean": preview_stderr_clean,
-            "parsed": preview_parsed,
-        }
-        if preview_result["retcode"] != 0:
-            details = preview_stderr_clean or preview_stdout_clean or ""
-            details = details.strip()
-            if details:
-                result["comment"] = "dnscontrol preview failed: {}".format(details)
-            else:
-                result["comment"] = "dnscontrol preview failed"
-            return result
-
-        has_changes = _preview_has_changes(preview_result)
-        result["changes"]["would_push"] = has_changes
-
-        if test:
-            result["result"] = True
-            result["comment"] = "Preview completed in test mode; push skipped"
-            preview_text = preview_stdout_clean.strip()
-            if preview_text:
-                result["comment"] += "\n\n{}".format(preview_text)
-            return result
-
-        if report["warnings"] and cfg["fail_on_warnings"]:
-            result["comment"] = "Warnings detected and fail_on_warnings=true; push blocked"
-            return result
-
-        if not has_changes:
-            result["result"] = True
-            result["comment"] = "No DNS changes detected; push skipped"
-            return result
-
-        push_result = push(config_dir=config_dir, pillar_dnscontrol=cfg)
-        result["changes"]["push"] = {
-            "retcode": push_result["retcode"],
-            "stdout": push_result["stdout"],
-            "stderr": push_result["stderr"],
-        }
-        if push_result["retcode"] != 0:
-            details = _strip_ansi(push_result.get("stderr") or push_result.get("stdout") or "")
-            details = details.strip()
-            if details:
-                result["comment"] = "dnscontrol push failed: {}".format(details)
-            else:
-                result["comment"] = "dnscontrol push failed"
-            return result
-
-        result["result"] = True
-        result["comment"] = "Preview and push completed successfully"
-        return result
-
-    except LockTimeoutError as exc:
-        report = _new_report()
-        _add_issue(report, "error", str(exc))
-        result["report"] = report
-        result["comment"] = str(exc)
-        return result
-    except Exception as exc:  # pragma: no cover
-        report = result.get("report") or _new_report()
-        _add_issue(report, "error", "Unhandled exception: {}".format(exc))
-        result["report"] = report
-        result["comment"] = "Unhandled exception during dnscontrol.apply: {}".format(exc)
-        return result
-    finally:
-        _unlock_file(lock_fd)
+    return _run_with_dnscontrol_lock(cfg, result, "apply", _apply_action)
 
 
 def _prepare_payload(providers, zones, report):
@@ -1380,9 +1391,6 @@ def apply_payload(
     test=False,
 ):
     """Render and execute dnscontrol from pre-built payload (zones/providers)."""
-    if zones is None or providers is None:
-        return apply(config_dir=config_dir, test=test)
-
     result = {
         "result": False,
         "changes": {},
@@ -1421,26 +1429,25 @@ def apply_payload(
 
     cfg["fail_on_warnings"] = _as_bool(fail_on_warnings, True)
 
+    # Keep backward compatibility: when payload is not provided, reuse the full
+    # apply() pipeline but with already-resolved overrides from this function.
+    if zones is None or providers is None:
+        return apply(
+            config_dir=cfg["config_dir"],
+            test=test,
+            pillar_dnscontrol=cfg,
+        )
+
     if warnings:
         if not isinstance(warnings, list):
             warnings = [str(warnings)]
         for warning in warnings:
             _add_issue(result["report"], "warning", str(warning))
 
-    binary_ok, binary_msg, binary_path = _validate_dnscontrol_binary(
-        cfg.get("dnscontrol_bin", "dnscontrol")
-    )
-    if not binary_ok:
-        _add_issue(result["report"], "error", binary_msg)
-        result["comment"] = binary_msg
+    if not _ensure_dnscontrol_binary(cfg, result):
         return result
 
-    result["changes"]["binary"] = {"path": binary_path, "check": "ok"}
-
-    lock_fd = None
-    try:
-        lock_fd = _lock_file(cfg["lock_file"], cfg["lock_timeout_sec"])
-
+    def _apply_payload_action():
         payload_providers, payload_zones = _prepare_payload(
             providers=providers,
             zones=zones,
@@ -1450,92 +1457,13 @@ def apply_payload(
             result["comment"] = "Invalid dnscontrol payload"
             return result
 
-        render_result = render_config(
+        return _execute_render_preview_push(
+            cfg=cfg,
             config_dir=cfg["config_dir"],
             zones=payload_zones,
             providers=payload_providers,
-            pillar_dnscontrol=cfg,
+            report=result["report"],
+            test=test,
         )
-        if not render_result.get("result"):
-            result["comment"] = render_result.get("comment", "render_config failed")
-            return result
-        result["changes"]["rendered_files"] = render_result["files"]
 
-        preview_result = _run_command(
-            "{} preview".format(cfg.get("dnscontrol_bin", "dnscontrol")),
-            cwd=cfg["config_dir"],
-        )
-        preview_stdout_clean = _strip_ansi(preview_result.get("stdout", ""))
-        preview_stderr_clean = _strip_ansi(preview_result.get("stderr", ""))
-        preview_parsed = _parse_preview_output(preview_stdout_clean)
-        result["changes"]["preview"] = {
-            "retcode": preview_result["retcode"],
-            "stdout": preview_result["stdout"],
-            "stderr": preview_result["stderr"],
-            "stdout_clean": preview_stdout_clean,
-            "stderr_clean": preview_stderr_clean,
-            "parsed": preview_parsed,
-        }
-        if preview_result["retcode"] != 0:
-            details = preview_stderr_clean or preview_stdout_clean or ""
-            details = details.strip()
-            if details:
-                result["comment"] = "dnscontrol preview failed: {}".format(details)
-            else:
-                result["comment"] = "dnscontrol preview failed"
-            return result
-
-        has_changes = _preview_has_changes(preview_result)
-        result["changes"]["would_push"] = has_changes
-
-        if test:
-            result["result"] = True
-            result["comment"] = "Preview completed in test mode; push skipped"
-            preview_text = preview_stdout_clean.strip()
-            if preview_text:
-                result["comment"] += "\n\n{}".format(preview_text)
-            return result
-
-        if result["report"]["warnings"] and cfg["fail_on_warnings"]:
-            result["comment"] = "Warnings detected and fail_on_warnings=true; push blocked"
-            return result
-
-        if not has_changes:
-            result["result"] = True
-            result["comment"] = "No DNS changes detected; push skipped"
-            return result
-
-        push_result = _run_command(
-            "{} push".format(cfg.get("dnscontrol_bin", "dnscontrol")),
-            cwd=cfg["config_dir"],
-        )
-        result["changes"]["push"] = {
-            "retcode": push_result["retcode"],
-            "stdout": push_result["stdout"],
-            "stderr": push_result["stderr"],
-        }
-        if push_result["retcode"] != 0:
-            details = _strip_ansi(push_result.get("stderr") or push_result.get("stdout") or "")
-            details = details.strip()
-            if details:
-                result["comment"] = "dnscontrol push failed: {}".format(details)
-            else:
-                result["comment"] = "dnscontrol push failed"
-            return result
-
-        result["result"] = True
-        result["comment"] = "Preview and push completed successfully"
-        return result
-
-    except LockTimeoutError as exc:
-        _add_issue(result["report"], "error", str(exc))
-        result["comment"] = str(exc)
-        return result
-    except Exception as exc:  # pragma: no cover
-        _add_issue(result["report"], "error", "Unhandled exception: {}".format(exc))
-        result["comment"] = "Unhandled exception during dnscontrol.apply_payload: {}".format(
-            exc
-        )
-        return result
-    finally:
-        _unlock_file(lock_fd)
+    return _run_with_dnscontrol_lock(cfg, result, "apply_payload", _apply_payload_action)
