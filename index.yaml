@@ -1,0 +1,14 @@
+apiVersion: v1
+generated: 2026-03-20 11:51:36.030487
+packages:
+  dnscontrol:
+  - version: 0.1.0
+    url: https://github.com/SomeBlackMagic/salt-dnscontrol-formula/releases/download/dnscontrol-0.1.0/dnscontrol-0.1.0.tgz
+    digest: sha256:3de56091eb48236b47468e9f92a0b7ba77b6ef8657d801c5cf6cb4fc641579e0
+    created: 2026-03-20 11:51:36.030459
+    keywords: []
+    maintainers:
+    - name: Andrii Chornyi
+      email: dev@example.com
+    sources: []
+    dependencies: []
