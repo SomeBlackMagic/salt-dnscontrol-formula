@@ -7,6 +7,7 @@ Files:
 - `02-override-and-tombstone.sls` - deterministic group ordering, `override`, and disabled tombstone.
 - `03-multi-value-and-relaxed.sls` - relaxed duplicate policy and allowed multi-value records.
 - `04-strict-conflict.sls` - strict duplicate conflict example that should fail validation.
+- `05-custom-archive-source.sls` - custom DNSControl archive URL/version/path.
 
 How to use:
 1. Copy one file content into your pillar tree (or include it).

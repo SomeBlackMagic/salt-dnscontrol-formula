@@ -7,7 +7,7 @@ dnscontrol_apply:
     - name: dnscontrol
     - config_dir: {{ dnscontrol.config_dir }}
     - require:
-      - pkg: dnscontrol_pkg
+      - test: dnscontrol_install_ready
       - file: dnscontrol_config_dir
       - file: dnscontrol_lock_dir
 

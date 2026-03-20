@@ -21,7 +21,7 @@ _DEFAULT_CONFIG = {
     "config_dir": "/etc/dnscontrol",
     "lock_file": "/var/lock/dnscontrol.lock",
     "lock_timeout_sec": 120,
-    "dnscontrol_bin": "dnscontrol",
+    "dnscontrol_bin": "/usr/local/bin/dnscontrol",
     "template_base": "salt://dnscontrol/templates",
     "saltenv": "base",
     "strict_duplicates": True,

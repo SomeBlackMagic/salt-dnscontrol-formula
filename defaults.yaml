@@ -1,6 +1,17 @@
 enable: false
 
+install_method: archive
 package_name: dnscontrol
+bin_path: /usr/local/bin/dnscontrol
+dnscontrol_bin: /usr/local/bin/dnscontrol
+
+archive_url: https://github.com/StackExchange/dnscontrol/releases/download/v4.36.1/dnscontrol_4.36.1_linux_amd64.tar.gz
+archive_version: '4.36.1'
+archive_extract_root: /opt/dnscontrol
+archive_binary_name: dnscontrol
+archive_source_hash: ''
+archive_enforce_toplevel: false
+
 config_dir: /etc/dnscontrol
 config_mode: '0700'
 creds_mode: '0600'
@@ -9,8 +20,6 @@ lock_timeout_sec: 120
 
 template_base: salt://dnscontrol/templates
 saltenv: base
-
-dnscontrol_bin: dnscontrol
 
 strict_duplicates: true
 fail_on_warnings: true
