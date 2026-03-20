@@ -5,11 +5,21 @@
     - package install (fallback)
 -#}
 {% from tpldir ~ "/map.jinja" import dnscontrol with context %}
+{% set install = dnscontrol.get('install', {}) %}
+{% set archive = install.get('archive', {}) %}
 {% set lock_dir = dnscontrol.lock_file.rsplit('/', 1)[0] if '/' in dnscontrol.lock_file else '/var/lock' %}
-{% set bin_dir = dnscontrol.bin_path.rsplit('/', 1)[0] if '/' in dnscontrol.bin_path else '/usr/local/bin' %}
-{% set install_method = dnscontrol.install_method|default('archive') %}
-{% set release_dir = dnscontrol.archive_extract_root ~ '/' ~ dnscontrol.archive_version %}
-{% set extracted_binary = release_dir ~ '/' ~ dnscontrol.archive_binary_name %}
+{% set bin_path = install.get('bin_path', '/usr/local/bin/dnscontrol') %}
+{% set bin_dir = bin_path.rsplit('/', 1)[0] if '/' in bin_path else '/usr/local/bin' %}
+{% set install_method = install.get('method', 'archive') %}
+{% set install_enabled = install.get('enabled', true) %}
+{% set archive_extract_root = archive.get('extract_root', '/opt/dnscontrol') %}
+{% set archive_version = archive.get('version', '4.36.1') %}
+{% set archive_binary_name = archive.get('binary_name', 'dnscontrol') %}
+{% set archive_url = archive.get('url', '') %}
+{% set archive_source_hash = archive.get('source_hash', '') %}
+{% set archive_enforce_toplevel = archive.get('enforce_toplevel', false) %}
+{% set release_dir = archive_extract_root ~ '/' ~ archive_version %}
+{% set extracted_binary = release_dir ~ '/' ~ archive_binary_name %}
 
 {% if dnscontrol.enable %}
 
@@ -29,11 +39,12 @@ dnscontrol_lock_dir:
     - mode: '0755'
     - makedirs: true
 
+{% if install_enabled %}
 {% if install_method == 'archive' %}
 
 dnscontrol_archive_root:
   file.directory:
-    - name: {{ dnscontrol.archive_extract_root }}
+    - name: {{ archive_extract_root }}
     - user: root
     - group: root
     - mode: '0755'
@@ -50,18 +61,18 @@ dnscontrol_bin_dir:
 dnscontrol_archive_extracted:
   archive.extracted:
     - name: {{ release_dir }}
-    - source: {{ dnscontrol.archive_url }}
+    - source: {{ archive_url }}
     - if_missing: {{ extracted_binary }}
-    - enforce_toplevel: {{ dnscontrol.archive_enforce_toplevel }}
-{% if dnscontrol.archive_source_hash %}
-    - source_hash: {{ dnscontrol.archive_source_hash }}
+    - enforce_toplevel: {{ archive_enforce_toplevel }}
+{% if archive_source_hash %}
+    - source_hash: {{ archive_source_hash }}
 {% endif %}
     - require:
       - file: dnscontrol_archive_root
 
 dnscontrol_binary_link:
   file.symlink:
-    - name: {{ dnscontrol.bin_path }}
+    - name: {{ bin_path }}
     - target: {{ extracted_binary }}
     - force: true
     - require:
@@ -77,7 +88,7 @@ dnscontrol_install_ready:
 
 dnscontrol_pkg:
   pkg.installed:
-    - name: {{ dnscontrol.package_name }}
+    - name: {{ install.get('package_name', 'dnscontrol') }}
 
 dnscontrol_install_ready:
   test.nop:
@@ -88,7 +99,17 @@ dnscontrol_install_ready:
 
 dnscontrol_install_ready:
   test.fail_without_changes:
-    - name: "Unsupported dnscontrol.install_method: {{ install_method }}"
+    - name: "Unsupported dnscontrol.install.method: {{ install_method }}"
+
+{% endif %}
+{% else %}
+
+dnscontrol_install_ready:
+  test.nop:
+    - name: "Binary installation skipped (dnscontrol.install.enabled=false)"
+    - require:
+      - file: dnscontrol_config_dir
+      - file: dnscontrol_lock_dir
 
 {% endif %}
 

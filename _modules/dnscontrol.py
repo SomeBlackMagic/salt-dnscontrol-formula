@@ -4,6 +4,7 @@ import copy
 import errno
 import json
 import os
+import shlex
 import subprocess
 import time
 from collections import OrderedDict
@@ -777,22 +778,46 @@ def render_config(config_dir=None, zones=None, providers=None, pillar_dnscontrol
 def _run_command(command, cwd):
     cmd_runner = __salt__.get("cmd.run_all")
     if cmd_runner:
-        ret = cmd_runner(command, cwd=cwd, python_shell=False)
+        try:
+            ret = cmd_runner(command, cwd=cwd, python_shell=False)
+            return {
+                "cmd": command,
+                "cwd": cwd,
+                "retcode": ret.get("retcode", 1),
+                "stdout": ret.get("stdout", ""),
+                "stderr": ret.get("stderr", ""),
+            }
+        except Exception as exc:  # pragma: no cover
+            return {
+                "cmd": command,
+                "cwd": cwd,
+                "retcode": 1,
+                "stdout": "",
+                "stderr": "cmd.run_all failed: {}".format(exc),
+            }
+
+    try:
+        argv = shlex.split(command)
+    except Exception:
+        argv = command.split()
+
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:  # pragma: no cover
         return {
             "cmd": command,
             "cwd": cwd,
-            "retcode": ret.get("retcode", 1),
-            "stdout": ret.get("stdout", ""),
-            "stderr": ret.get("stderr", ""),
+            "retcode": 1,
+            "stdout": "",
+            "stderr": "subprocess execution failed: {}".format(exc),
         }
 
-    proc = subprocess.run(
-        command.split(),
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
     return {
         "cmd": command,
         "cwd": cwd,
@@ -928,7 +953,12 @@ def apply(config_dir=None, test=False, pillar_dnscontrol=None):
             "stderr": preview_result["stderr"],
         }
         if preview_result["retcode"] != 0:
-            result["comment"] = "dnscontrol preview failed"
+            details = preview_result.get("stderr") or preview_result.get("stdout") or ""
+            details = details.strip()
+            if details:
+                result["comment"] = "dnscontrol preview failed: {}".format(details)
+            else:
+                result["comment"] = "dnscontrol preview failed"
             return result
 
         has_changes = _preview_has_changes(preview_result)
@@ -937,6 +967,9 @@ def apply(config_dir=None, test=False, pillar_dnscontrol=None):
         if test:
             result["result"] = True
             result["comment"] = "Preview completed in test mode; push skipped"
+            preview_text = (preview_result.get("stdout") or "").strip()
+            if preview_text:
+                result["comment"] += "\n\n{}".format(preview_text)
             return result
 
         if report["warnings"] and cfg["fail_on_warnings"]:
@@ -955,7 +988,12 @@ def apply(config_dir=None, test=False, pillar_dnscontrol=None):
             "stderr": push_result["stderr"],
         }
         if push_result["retcode"] != 0:
-            result["comment"] = "dnscontrol push failed"
+            details = push_result.get("stderr") or push_result.get("stdout") or ""
+            details = details.strip()
+            if details:
+                result["comment"] = "dnscontrol push failed: {}".format(details)
+            else:
+                result["comment"] = "dnscontrol push failed"
             return result
 
         result["result"] = True
@@ -972,7 +1010,303 @@ def apply(config_dir=None, test=False, pillar_dnscontrol=None):
         report = result.get("report") or _new_report()
         _add_issue(report, "error", "Unhandled exception: {}".format(exc))
         result["report"] = report
-        result["comment"] = "Unhandled exception during dnscontrol.apply"
+        result["comment"] = "Unhandled exception during dnscontrol.apply: {}".format(exc)
+        return result
+    finally:
+        _unlock_file(lock_fd)
+
+
+def _prepare_payload(providers, zones, report):
+    if not isinstance(providers, dict):
+        raise DNSControlError("'providers' must be a mapping")
+    if not isinstance(zones, dict):
+        raise DNSControlError("'zones' must be a mapping")
+
+    prepared_providers = OrderedDict()
+    for provider_name in sorted(providers.keys()):
+        try:
+            prepared_providers[provider_name] = _prepare_provider(
+                provider_name, providers[provider_name]
+            )
+        except DNSControlError as exc:
+            _add_issue(report, "error", str(exc), provider=provider_name)
+
+    prepared_zones = OrderedDict()
+    for zone_name in sorted(zones.keys()):
+        zone_data = zones[zone_name]
+        if not isinstance(zone_data, dict):
+            _add_issue(
+                report,
+                "error",
+                "Zone '{}' payload must be a mapping".format(zone_name),
+                zone=zone_name,
+            )
+            continue
+
+        provider_name = zone_data.get("provider")
+        if not provider_name:
+            _add_issue(
+                report,
+                "error",
+                "Zone '{}' payload missing 'provider'".format(zone_name),
+                zone=zone_name,
+            )
+            continue
+        if provider_name not in prepared_providers:
+            _add_issue(
+                report,
+                "error",
+                "Zone '{}': provider '{}' is not defined".format(zone_name, provider_name),
+                zone=zone_name,
+            )
+            continue
+
+        records = zone_data.get("records")
+        if records is None:
+            records = zone_data.get("final_records", [])
+        if not isinstance(records, list):
+            _add_issue(
+                report,
+                "error",
+                "Zone '{}': payload records must be a list".format(zone_name),
+                zone=zone_name,
+            )
+            continue
+
+        default_ttl = zone_data.get("default_ttl")
+        if default_ttl is not None:
+            try:
+                default_ttl = _as_int(default_ttl, "default_ttl")
+            except DNSControlError as exc:
+                _add_issue(report, "error", str(exc), zone=zone_name)
+                continue
+
+        rendered_records = []
+        for idx, raw in enumerate(records):
+            if not isinstance(raw, dict):
+                _add_issue(
+                    report,
+                    "error",
+                    "Zone '{}': record index {} must be a mapping".format(zone_name, idx),
+                    zone=zone_name,
+                    record_index=idx,
+                )
+                continue
+
+            # Support payload where records are already rendered as {"call": "..."}.
+            if raw.get("call"):
+                rendered_records.append(
+                    {
+                        "name": raw.get("name", "@"),
+                        "type": str(raw.get("type", "RAW")).upper(),
+                        "ttl": raw.get("ttl"),
+                        "call": str(raw["call"]),
+                        "fqdn": raw.get("fqdn", ""),
+                        "group": raw.get("group", "payload"),
+                    }
+                )
+                continue
+
+            try:
+                rec = _normalize_record(
+                    raw,
+                    zone_name=zone_name,
+                    default_ttl=default_ttl,
+                    group_name="payload",
+                    group_index=0,
+                    record_index=idx,
+                )
+            except DNSControlError as exc:
+                _add_issue(
+                    report,
+                    "error",
+                    str(exc),
+                    zone=zone_name,
+                    record_index=idx,
+                )
+                continue
+
+            if rec.get("disabled"):
+                continue
+
+            rendered_records.append(
+                {
+                    "name": rec["name"],
+                    "type": rec["type"],
+                    "ttl": rec.get("ttl"),
+                    "call": rec["call"],
+                    "fqdn": rec["fqdn"],
+                    "group": "payload",
+                }
+            )
+
+        prepared_zones[zone_name] = {
+            "provider": provider_name,
+            "default_ttl": default_ttl,
+            "records_input": len(records),
+            "final_records": rendered_records,
+        }
+
+    _finalize_report(report, prepared_zones)
+    return prepared_providers, prepared_zones
+
+
+def apply_payload(
+    zones=None,
+    providers=None,
+    warnings=None,
+    fail_on_warnings=True,
+    config_dir=None,
+    dnscontrol_bin=None,
+    lock_file=None,
+    lock_timeout_sec=None,
+    creds_mode=None,
+    config_mode=None,
+    template_base=None,
+    saltenv=None,
+    test=False,
+):
+    """Render and execute dnscontrol from pre-built payload (zones/providers)."""
+    if zones is None or providers is None:
+        return apply(config_dir=config_dir, test=test)
+
+    result = {
+        "result": False,
+        "changes": {},
+        "comment": "",
+        "report": _new_report(),
+    }
+
+    try:
+        cfg = _load_config()
+    except DNSControlError as exc:
+        _add_issue(result["report"], "error", str(exc))
+        result["comment"] = str(exc)
+        return result
+
+    if config_dir is not None:
+        cfg["config_dir"] = config_dir
+    if dnscontrol_bin is not None:
+        cfg["dnscontrol_bin"] = str(dnscontrol_bin)
+    if lock_file is not None:
+        cfg["lock_file"] = str(lock_file)
+    if lock_timeout_sec is not None:
+        try:
+            cfg["lock_timeout_sec"] = _as_int(lock_timeout_sec, "lock_timeout_sec")
+        except DNSControlError as exc:
+            _add_issue(result["report"], "error", str(exc))
+            result["comment"] = str(exc)
+            return result
+    if creds_mode is not None:
+        cfg["creds_mode"] = str(creds_mode)
+    if config_mode is not None:
+        cfg["config_mode"] = str(config_mode)
+    if template_base is not None:
+        cfg["template_base"] = str(template_base)
+    if saltenv is not None:
+        cfg["saltenv"] = str(saltenv)
+
+    cfg["fail_on_warnings"] = _as_bool(fail_on_warnings, True)
+
+    if warnings:
+        if not isinstance(warnings, list):
+            warnings = [str(warnings)]
+        for warning in warnings:
+            _add_issue(result["report"], "warning", str(warning))
+
+    lock_fd = None
+    try:
+        lock_fd = _lock_file(cfg["lock_file"], cfg["lock_timeout_sec"])
+
+        payload_providers, payload_zones = _prepare_payload(
+            providers=providers,
+            zones=zones,
+            report=result["report"],
+        )
+        if result["report"]["errors"]:
+            result["comment"] = "Invalid dnscontrol payload"
+            return result
+
+        render_result = render_config(
+            config_dir=cfg["config_dir"],
+            zones=payload_zones,
+            providers=payload_providers,
+            pillar_dnscontrol=cfg,
+        )
+        if not render_result.get("result"):
+            result["comment"] = render_result.get("comment", "render_config failed")
+            return result
+        result["changes"]["rendered_files"] = render_result["files"]
+
+        preview_result = _run_command(
+            "{} preview".format(cfg.get("dnscontrol_bin", "dnscontrol")),
+            cwd=cfg["config_dir"],
+        )
+        result["changes"]["preview"] = {
+            "retcode": preview_result["retcode"],
+            "stdout": preview_result["stdout"],
+            "stderr": preview_result["stderr"],
+        }
+        if preview_result["retcode"] != 0:
+            details = preview_result.get("stderr") or preview_result.get("stdout") or ""
+            details = details.strip()
+            if details:
+                result["comment"] = "dnscontrol preview failed: {}".format(details)
+            else:
+                result["comment"] = "dnscontrol preview failed"
+            return result
+
+        has_changes = _preview_has_changes(preview_result)
+        result["changes"]["would_push"] = has_changes
+
+        if test:
+            result["result"] = True
+            result["comment"] = "Preview completed in test mode; push skipped"
+            preview_text = (preview_result.get("stdout") or "").strip()
+            if preview_text:
+                result["comment"] += "\n\n{}".format(preview_text)
+            return result
+
+        if result["report"]["warnings"] and cfg["fail_on_warnings"]:
+            result["comment"] = "Warnings detected and fail_on_warnings=true; push blocked"
+            return result
+
+        if not has_changes:
+            result["result"] = True
+            result["comment"] = "No DNS changes detected; push skipped"
+            return result
+
+        push_result = _run_command(
+            "{} push".format(cfg.get("dnscontrol_bin", "dnscontrol")),
+            cwd=cfg["config_dir"],
+        )
+        result["changes"]["push"] = {
+            "retcode": push_result["retcode"],
+            "stdout": push_result["stdout"],
+            "stderr": push_result["stderr"],
+        }
+        if push_result["retcode"] != 0:
+            details = push_result.get("stderr") or push_result.get("stdout") or ""
+            details = details.strip()
+            if details:
+                result["comment"] = "dnscontrol push failed: {}".format(details)
+            else:
+                result["comment"] = "dnscontrol push failed"
+            return result
+
+        result["result"] = True
+        result["comment"] = "Preview and push completed successfully"
+        return result
+
+    except LockTimeoutError as exc:
+        _add_issue(result["report"], "error", str(exc))
+        result["comment"] = str(exc)
+        return result
+    except Exception as exc:  # pragma: no cover
+        _add_issue(result["report"], "error", "Unhandled exception: {}".format(exc))
+        result["comment"] = "Unhandled exception during dnscontrol.apply_payload: {}".format(
+            exc
+        )
         return result
     finally:
         _unlock_file(lock_fd)

@@ -1,7 +1,17 @@
 dnscontrol:
   enable: true
 
-  package_name: dnscontrol
+  install:
+    enabled: true
+    method: archive
+    package_name: dnscontrol
+    bin_path: /usr/local/bin/dnscontrol
+    archive:
+      url: https://github.com/StackExchange/dnscontrol/releases/download/v4.36.1/dnscontrol_4.36.1_linux_amd64.tar.gz
+      version: "4.36.1"
+      extract_root: /opt/dnscontrol
+      binary_name: dnscontrol
+
   config_dir: /etc/dnscontrol
   lock_file: /var/lock/dnscontrol.lock
 

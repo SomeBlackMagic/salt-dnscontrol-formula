@@ -3,14 +3,18 @@
 dnscontrol:
   enable: true
 
-  install_method: archive
-  archive_url: https://github.com/StackExchange/dnscontrol/releases/download/v4.36.1/dnscontrol_4.36.1_linux_amd64.tar.gz
-  archive_version: "4.36.1"
-  archive_extract_root: /opt/dnscontrol
-  archive_binary_name: dnscontrol
-  bin_path: /usr/local/bin/dnscontrol
+  install:
+    enabled: true
+    method: archive
+    bin_path: /usr/local/bin/dnscontrol
+    archive:
+      url: https://github.com/StackExchange/dnscontrol/releases/download/v4.36.1/dnscontrol_4.36.1_linux_amd64.tar.gz
+      version: "4.36.1"
+      extract_root: /opt/dnscontrol
+      binary_name: dnscontrol
+      # source_hash: sha256=<REPLACE_ME>
+
   dnscontrol_bin: /usr/local/bin/dnscontrol
-  # archive_source_hash: sha256=<REPLACE_ME>
 
   strict_duplicates: true
   fail_on_warnings: true

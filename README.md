@@ -5,7 +5,7 @@ Salt formula for managing DNS via DNSControl, with Salt Pillar as the source of 
 ## What this formula does
 
 - reads DNS data from `pillar:dnscontrol`
-- performs deterministic merge of `record_groups`
+- performs deterministic merge of `record_groups` in `apply.sls` (Jinja layer)
 - applies `override` and `disabled` semantics (including tombstone via `disabled: true` + `override: true`)
 - detects duplicates/conflicts (strict/relaxed modes)
 - renders `dnsconfig.js` and `creds.json`
@@ -16,8 +16,8 @@ Salt formula for managing DNS via DNSControl, with Salt Pillar as the source of 
 
 - `init.sls` - formula entry point
 - `install.sls` - package installation and directory preparation
-- `apply.sls` - invokes state `dnscontrol.managed`
-- `_modules/dnscontrol.py` - build/validate/render/preview/push/apply logic
+- `apply.sls` - builds merged payload and invokes `dnscontrol.managed`
+- `_modules/dnscontrol.py` - execution logic: render config + `preview/push` against provider
 - `_states/dnscontrol.py` - state wrapper `managed`
 - `templates/` - `dnsconfig.js.jinja` and `creds.json.jinja`
 - `pillars.example/` - ready-to-use pillar examples
@@ -50,18 +50,20 @@ salt '<minion>' state.apply dnscontrol test=True
 ```yaml
 dnscontrol:
   enable: true
-  install_method: archive
 
   strict_duplicates: true
   fail_on_warnings: true
   multi_value_types: [MX, TXT, SRV]
 
-  archive_url: https://github.com/StackExchange/dnscontrol/releases/download/v4.36.1/dnscontrol_4.36.1_linux_amd64.tar.gz
-  archive_version: "4.36.1"
-  archive_extract_root: /opt/dnscontrol
-  archive_binary_name: dnscontrol
-  bin_path: /usr/local/bin/dnscontrol
-  dnscontrol_bin: /usr/local/bin/dnscontrol
+  install:
+    enabled: true
+    method: archive
+    bin_path: /usr/local/bin/dnscontrol
+    archive:
+      url: https://github.com/StackExchange/dnscontrol/releases/download/v4.36.1/dnscontrol_4.36.1_linux_amd64.tar.gz
+      version: "4.36.1"
+      extract_root: /opt/dnscontrol
+      binary_name: dnscontrol
 
   config_dir: /etc/dnscontrol
   lock_file: /var/lock/dnscontrol.lock
@@ -95,15 +97,16 @@ dnscontrol:
 ## Key `dnscontrol` fields
 
 - `enable` - enables/disables formula states
-- `install_method` - `archive` (default) or `package`
-- `archive_url` - URL to `.tar.gz` DNSControl release archive
-- `archive_version` - release version, used in install path under `archive_extract_root`
-- `archive_extract_root` - base directory for extracted versions (default `/opt/dnscontrol`)
-- `archive_binary_name` - binary filename inside extracted archive (default `dnscontrol`)
-- `bin_path` - symlink path to active binary (default `/usr/local/bin/dnscontrol`)
-- `archive_source_hash` - optional checksum for archive verification
-- `package_name` - package name used only when `install_method: package`
-- `dnscontrol_bin` - binary path used for `preview/push` execution
+- `install.enabled` - enables/disables binary installation step; directory setup still runs
+- `install.method` - `archive` (default) or `package`
+- `install.bin_path` - symlink path to active binary (default `/usr/local/bin/dnscontrol`)
+- `install.package_name` - package name used only when `install.method: package`
+- `install.archive.url` - URL to `.tar.gz` DNSControl release archive
+- `install.archive.version` - release version used in install path under `install.archive.extract_root`
+- `install.archive.extract_root` - base directory for extracted versions (default `/opt/dnscontrol`)
+- `install.archive.binary_name` - binary filename inside extracted archive (default `dnscontrol`)
+- `install.archive.source_hash` - optional checksum for archive verification
+- `dnscontrol_bin` - optional runtime override for `preview/push` command path
 - `config_dir` - output directory for `dnsconfig.js` and `creds.json`
 - `strict_duplicates` - `true`: conflict = error, `false`: conflict = warning
 - `fail_on_warnings` - blocks `push` when warnings are present
@@ -131,4 +134,4 @@ See `pillars.example/`:
 
 - Full end-to-end verification requires real `dnscontrol` binary and provider API access.
 - "No changes" detection after `preview` is based on common DNSControl output markers.
-- Archive extraction assumes the binary is available as `<archive_extract_root>/<archive_version>/<archive_binary_name>`.
+- Archive extraction assumes the binary is available as `<install.archive.extract_root>/<install.archive.version>/<install.archive.binary_name>`.
